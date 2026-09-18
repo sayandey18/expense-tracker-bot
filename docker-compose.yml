@@ -14,5 +14,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "8787:8787"
+    networks:
+      - default
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: n8n-stack_proxy
