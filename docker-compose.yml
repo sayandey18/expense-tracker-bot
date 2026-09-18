@@ -1,0 +1,18 @@
+name: expense-bot
+# -----------------------------------
+# Production Expense Tracker Bot stack
+#  - PostgreSQL database
+#  - DeepSeek AI integration
+#  - Telegram Bot API
+#  - Node.js application
+# -----------------------------------
+services:
+  expense-bot:
+    build: .
+    image: expense-bot:latest
+    container_name: expense-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8787:8787"
