@@ -1,4 +1,5 @@
 import type { CategoryName } from '../categories.js';
+import { formatAmount } from '../currency.js';
 import { getSpendingSummary, type SummaryRow } from '../db/repos.js';
 import { clarifyOtherCategories, type Clarification } from '../deepseek.js';
 import type { MonthRef, PeriodKey } from '../query.js';
@@ -8,6 +9,7 @@ export interface QueryExpenseInput {
   period?: PeriodKey;
   month?: MonthRef;
   category?: CategoryName;
+  currency: string;
 }
 
 interface ResolvedPeriod {
@@ -133,6 +135,7 @@ function formatSummary(
   clarifications: Clarification[],
   label: string,
   category: CategoryName | null,
+  currency: string,
 ): string {
   const rows: SummaryRow[] = baseRows.map((row) => ({ ...row }));
   for (const clarification of clarifications) {
@@ -145,7 +148,7 @@ function formatSummary(
     if (rows.length === 0) {
       return `No ${category} spending found for ${label.toLowerCase()}.`;
     }
-    return `📊 ${category} Spending · ${label}\n\nTotal ₹${total.toFixed(2)}`;
+    return `📊 ${category} Spending · ${label}\n\nTotal ${formatAmount(total, currency)}`;
   }
 
   if (rows.length === 0) {
@@ -163,7 +166,7 @@ function formatSummary(
 
   const sorted = [...totals.entries()].sort((a, b) => b[1] - a[1]);
 
-  const amountOf = (value: number) => '₹' + value.toFixed(2);
+  const amountOf = (value: number) => formatAmount(value, currency);
   const catWidth = Math.max('Total'.length, ...sorted.map(([cat]) => cat.length));
   const amountWidth = Math.max(
     ...sorted.map(([, value]) => amountOf(value).length),
@@ -198,7 +201,13 @@ export async function queryExpense(input: QueryExpenseInput): Promise<{ response
   const { rows, needsAi, otherRows } = prepareSummaryData(rawRows);
 
   const clarifications = !input.category && needsAi ? await clarifyOtherCategories(otherRows) : [];
-  const response = formatSummary(rows, clarifications, resolved.label, input.category ?? null);
+  const response = formatSummary(
+    rows,
+    clarifications,
+    resolved.label,
+    input.category ?? null,
+    input.currency,
+  );
 
   return { response };
 }

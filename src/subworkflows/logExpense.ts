@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isCategoryName, type CategoryName } from '../categories.js';
+import { formatAmount } from '../currency.js';
 import { insertExpense } from '../db/repos.js';
 
 const expenseInputSchema = z.object({
@@ -13,6 +14,7 @@ const expenseInputSchema = z.object({
     .refine((value) => value < 10000000),
   category: z.string(),
   description: z.string(),
+  currency: z.string(),
 });
 
 export interface LogExpenseInput {
@@ -23,6 +25,7 @@ export interface LogExpenseInput {
   amount: number;
   category: string;
   description: string;
+  currency: string;
 }
 
 export async function logExpense(input: LogExpenseInput): Promise<{ response: string }> {
@@ -31,7 +34,7 @@ export async function logExpense(input: LogExpenseInput): Promise<{ response: st
     throw new Error('Invalid expense data');
   }
 
-  const { amount, category: rawCategory, text } = parsed.data;
+  const { amount, category: rawCategory, text, currency } = parsed.data;
   const description = parsed.data.description.trim();
   const rawMessage = text.trim();
 
@@ -50,6 +53,6 @@ export async function logExpense(input: LogExpenseInput): Promise<{ response: st
     telegramMessageId: parsed.data.telegramMessageId,
   });
 
-  const response = `✅ Logged ₹${amount} — ${category}: ${description}`;
+  const response = `✅ Logged ${formatAmount(amount, currency)} — ${category}: ${description}`;
   return { response };
 }

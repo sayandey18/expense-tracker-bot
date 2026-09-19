@@ -66,6 +66,28 @@ export async function registerUser(input: RegisterUserInput): Promise<void> {
     });
 }
 
+export interface UserSettings {
+  currency: string;
+  timezone: string;
+}
+
+export async function getUserSettings(userId: number): Promise<UserSettings | null> {
+  const rows = await db
+    .select({ currency: users.currency, timezone: users.timezone })
+    .from(users)
+    .where(and(eq(users.telegramUserId, userId), eq(users.isActive, true)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function setUserCurrency(userId: number, currency: string): Promise<void> {
+  await db.update(users).set({ currency }).where(eq(users.telegramUserId, userId));
+}
+
+export async function setUserTimezone(userId: number, timezone: string): Promise<void> {
+  await db.update(users).set({ timezone }).where(eq(users.telegramUserId, userId));
+}
+
 export interface LastExpense {
   amount: string;
   category: string;
@@ -105,6 +127,53 @@ export async function deleteLastExpense(userId: number): Promise<DeletedExpense 
   const rows = await db
     .delete(expenses)
     .where(inArray(expenses.id, subquery))
+    .returning({ id: expenses.id, amount: expenses.amount, description: expenses.description });
+  return rows[0] ?? null;
+}
+
+export interface RecentExpense {
+  id: number;
+  amount: string;
+  category: string;
+  description: string | null;
+  spentAt: Date;
+}
+
+export async function listRecentExpenses(
+  userId: number,
+  limit: number,
+  offset: number,
+): Promise<{ rows: RecentExpense[]; total: number }> {
+  const [rows, totalRows] = await Promise.all([
+    db
+      .select({
+        id: expenses.id,
+        amount: expenses.amount,
+        category: categories.name,
+        description: expenses.description,
+        spentAt: expenses.spentAt,
+      })
+      .from(expenses)
+      .innerJoin(categories, eq(expenses.categoryId, categories.id))
+      .where(eq(expenses.userId, userId))
+      .orderBy(desc(expenses.spentAt), desc(expenses.id))
+      .limit(limit)
+      .offset(offset),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(expenses)
+      .where(eq(expenses.userId, userId)),
+  ]);
+  return { rows, total: totalRows[0]?.count ?? 0 };
+}
+
+export async function deleteExpenseById(
+  userId: number,
+  id: number,
+): Promise<DeletedExpense | null> {
+  const rows = await db
+    .delete(expenses)
+    .where(and(eq(expenses.id, id), eq(expenses.userId, userId)))
     .returning({ id: expenses.id, amount: expenses.amount, description: expenses.description });
   return rows[0] ?? null;
 }

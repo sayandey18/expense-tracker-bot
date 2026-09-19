@@ -1,4 +1,5 @@
 import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy';
+import { CURRENCIES, CURRENCY_ORDER, TIMEZONES, formatAmount } from './currency.js';
 import { classifyMessage } from './deepseek.js';
 import * as repos from './db/repos.js';
 import { logger } from './logger.js';
@@ -17,6 +18,7 @@ const PRIVATE_COMMANDS = new Set([
   '/week',
   '/month',
   '/last',
+  '/list',
   '/delete',
   '/export',
   '/deleteme',
@@ -75,6 +77,114 @@ function replier(bot: Bot, chatId: number): Replier {
   return (text) => bot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
+function currencyKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (let i = 0; i < CURRENCY_ORDER.length; i += 3) {
+    for (const code of CURRENCY_ORDER.slice(i, i + 3)) {
+      keyboard.text(`${CURRENCIES[code]?.symbol ?? code} ${code}`, `cur:${code}`);
+    }
+    keyboard.row();
+  }
+  return keyboard;
+}
+
+function timezoneKeyboard(): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (let i = 0; i < TIMEZONES.length; i += 2) {
+    for (const tz of TIMEZONES.slice(i, i + 2)) {
+      keyboard.text(tz.label, `tz:${tz.id}`);
+    }
+    keyboard.row();
+  }
+  return keyboard;
+}
+
+const LIST_PAGE_SIZE = 10;
+
+const MONTH_ABBR = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+function formatListDate(date: Date): string {
+  return `${date.getUTCDate()} ${MONTH_ABBR[date.getUTCMonth()] ?? ''}`;
+}
+
+function renderExpenseList(
+  rows: repos.RecentExpense[],
+  total: number,
+  offset: number,
+  currency: string,
+): { text: string; keyboard: InlineKeyboard } {
+  const from = offset + 1;
+  const to = offset + rows.length;
+  const text = rows.length
+    ? `🗂 Your expenses — ${total} total (showing ${from}–${to})\nTap an entry to delete it.`
+    : 'No expenses logged yet.';
+
+  const keyboard = new InlineKeyboard();
+  for (const row of rows) {
+    const description = row.description ? row.description.slice(0, 24) : '';
+    const parts = [formatAmount(row.amount, currency), row.category];
+    if (description) parts.push(description);
+    parts.push(formatListDate(row.spentAt));
+    keyboard.text(`🗑 ${parts.join(' · ')}`, `del:${row.id}:${offset}`).row();
+  }
+
+  if (offset > 0) {
+    keyboard.text('◀ Prev', `page:${Math.max(0, offset - LIST_PAGE_SIZE)}`);
+  }
+  if (offset + rows.length < total) {
+    keyboard.text('Next ▶', `page:${offset + LIST_PAGE_SIZE}`);
+  }
+
+  return { text, keyboard };
+}
+
+async function refreshList(
+  bot: Bot,
+  ctx: Context,
+  userId: number,
+  offset: number,
+): Promise<void> {
+  const settings = await repos.getUserSettings(userId);
+  const currency = settings?.currency ?? 'INR';
+  const { rows, total } = await repos.listRecentExpenses(userId, LIST_PAGE_SIZE, offset);
+  const effectiveOffset =
+    rows.length === 0 && total > 0 ? Math.max(0, offset - LIST_PAGE_SIZE) : offset;
+
+  const { rows: pageRows, total: pageTotal } =
+    effectiveOffset === offset
+      ? { rows, total }
+      : await repos.listRecentExpenses(userId, LIST_PAGE_SIZE, effectiveOffset);
+
+  if (pageTotal === 0) {
+    await ctx.deleteMessage();
+    await bot.api.sendMessage(userId, 'No expenses logged yet.');
+    return;
+  }
+
+  const rendered = renderExpenseList(pageRows, pageTotal, effectiveOffset, currency);
+  try {
+    await ctx.editMessageText(rendered.text, { reply_markup: rendered.keyboard });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    if (!message.includes('message is not modified')) {
+      logger.error({ err }, '[list] editMessageText failed');
+    }
+  }
+}
+
 async function handleCallbackQuery(bot: Bot, ctx: Context): Promise<void> {
   const u = normalizeCallbackUpdate(ctx.callbackQuery);
   const reply = replier(bot, u.chatId);
@@ -87,14 +197,61 @@ async function handleCallbackQuery(bot: Bot, ctx: Context): Promise<void> {
       firstName: u.firstName,
     });
     await ctx.answerCallbackQuery("Saved — you're registered ✅");
-    await reply("You're registered ✅ Send an expense like: ₹450 dinner with friends");
+    await bot.api.sendMessage(u.chatId, 'Great! Now select your currency', {
+      reply_markup: currencyKeyboard(),
+    });
   } else if (u.text === 'consent:cancel') {
     await ctx.answerCallbackQuery('No problem — nothing was saved.');
     await reply('No problem, /register anytime.');
+  } else if (u.text.startsWith('cur:')) {
+    const code = u.text.slice(4);
+    if (!CURRENCIES[code]) {
+      await ctx.answerCallbackQuery('Unknown currency.');
+      return;
+    }
+    await repos.setUserCurrency(u.userId, code);
+    await ctx.answerCallbackQuery(`Currency: ${code}`);
+    await ctx.editMessageText('Now select your timezone', { reply_markup: timezoneKeyboard() });
+  } else if (u.text.startsWith('tz:')) {
+    const tz = u.text.slice(3);
+    const option = TIMEZONES.find((t) => t.id === tz);
+    if (!option) {
+      await ctx.answerCallbackQuery('Unknown timezone.');
+      return;
+    }
+    await repos.setUserTimezone(u.userId, tz);
+    const settings = await repos.getUserSettings(u.userId);
+    const currency = settings?.currency ?? 'INR';
+    const symbol = CURRENCIES[currency]?.symbol ?? currency;
+    await ctx.answerCallbackQuery('Timezone saved ✅');
+    await ctx.editMessageText(
+      `You're all set ✅\n\nCurrency: ${symbol} ${currency}\nTimezone: ${option.label}\n\nSend an expense like: ${symbol}450 dinner with friends`,
+    );
+  } else if (u.text.startsWith('del:')) {
+    const [, idStr, offsetStr] = u.text.split(':');
+    const id = Number(idStr);
+    const offset = Number(offsetStr ?? '0');
+
+    if (!Number.isInteger(id) || id <= 0) {
+      await ctx.answerCallbackQuery('Invalid request.');
+      return;
+    }
+
+    const deleted = await repos.deleteExpenseById(u.userId, id);
+    await ctx.answerCallbackQuery(deleted ? 'Deleted ✅' : 'Already deleted.');
+    await refreshList(bot, ctx, u.userId, Number.isInteger(offset) && offset >= 0 ? offset : 0);
+  } else if (u.text.startsWith('page:')) {
+    const offset = Number(u.text.split(':')[1] ?? '0');
+    await ctx.answerCallbackQuery();
+    await refreshList(bot, ctx, u.userId, Number.isInteger(offset) && offset >= 0 ? offset : 0);
   }
 }
 
-async function handleAuthenticatedFreeText(bot: Bot, u: NormalizedUpdate): Promise<void> {
+async function handleAuthenticatedFreeText(
+  bot: Bot,
+  u: NormalizedUpdate,
+  currency: string,
+): Promise<void> {
   const reply = replier(bot, u.chatId);
   const parsed = parseExpense(u.text);
 
@@ -108,6 +265,7 @@ async function handleAuthenticatedFreeText(bot: Bot, u: NormalizedUpdate): Promi
         amount: parsed.amount,
         category: parsed.category,
         description: parsed.description,
+        currency,
       });
       await reply(response);
     } catch (err) {
@@ -126,33 +284,34 @@ async function handleAuthenticatedFreeText(bot: Bot, u: NormalizedUpdate): Promi
       period: filters.period ?? undefined,
       month: filters.month ?? undefined,
       category: filters.category ?? undefined,
+      currency,
     });
     await reply(response || 'No spending found.');
   } else if (intent === 'unclear') {
-    await reply('I couldn’t understand that. Try: ₹450 dinner with friends');
+    await reply(`I couldn’t understand that. Try: ${formatAmount(450, currency)} dinner with friends`);
   } else if (intent === 'log_expense') {
     await reply(
-      'That sounds like an expense, but I couldn’t pick out an amount. Could you resend it like: ₹450 dinner with friends?',
+      `That sounds like an expense, but I couldn’t pick out an amount. Could you resend it like: ${formatAmount(450, currency)} dinner with friends?`,
     );
   }
 }
 
-async function handlePrivateCommand(bot: Bot, u: NormalizedUpdate): Promise<void> {
+async function handlePrivateCommand(bot: Bot, u: NormalizedUpdate, currency: string): Promise<void> {
   const reply = replier(bot, u.chatId);
 
   switch (u.text) {
     case '/today': {
-      const { response } = await queryExpense({ userId: u.userId, period: 'today' });
+      const { response } = await queryExpense({ userId: u.userId, period: 'today', currency });
       await reply(response || 'No spending found.');
       break;
     }
     case '/week': {
-      const { response } = await queryExpense({ userId: u.userId, period: 'week' });
+      const { response } = await queryExpense({ userId: u.userId, period: 'week', currency });
       await reply(response || 'No spending found.');
       break;
     }
     case '/month': {
-      const { response } = await queryExpense({ userId: u.userId, period: 'month' });
+      const { response } = await queryExpense({ userId: u.userId, period: 'month', currency });
       await reply(response || 'No spending found.');
       break;
     }
@@ -160,16 +319,26 @@ async function handlePrivateCommand(bot: Bot, u: NormalizedUpdate): Promise<void
       const last = await repos.getLastExpense(u.userId);
       await reply(
         last
-          ? `Last: ₹${last.amount} — ${last.category}: ${last.description}`
+          ? `Last: ${formatAmount(last.amount, currency)} — ${last.category}: ${last.description}`
           : 'No expenses logged yet.',
       );
+      break;
+    }
+    case '/list': {
+      const { rows, total } = await repos.listRecentExpenses(u.userId, LIST_PAGE_SIZE, 0);
+      if (total === 0) {
+        await reply('No expenses logged yet.');
+        break;
+      }
+      const rendered = renderExpenseList(rows, total, 0, currency);
+      await bot.api.sendMessage(u.chatId, rendered.text, { reply_markup: rendered.keyboard });
       break;
     }
     case '/delete': {
       const deleted = await repos.deleteLastExpense(u.userId);
       await reply(
         deleted
-          ? `Deleted ₹${deleted.amount} — ${deleted.description}`
+          ? `Deleted ${formatAmount(deleted.amount, currency)} — ${deleted.description}`
           : 'No expense found to delete.',
       );
       break;
@@ -201,6 +370,10 @@ async function handleTextUpdate(bot: Bot, u: NormalizedUpdate): Promise<void> {
   }
 
   if (u.text === '/register') {
+    if (await repos.isRegistered(u.userId)) {
+      await reply("You're already registered ✅\nSend an expense like: ₹450 dinner with friends");
+      return;
+    }
     await bot.api.sendMessage(
       u.chatId,
       'I can store your Telegram ID and the expenses you send me. Do you agree?',
@@ -208,7 +381,6 @@ async function handleTextUpdate(bot: Bot, u: NormalizedUpdate): Promise<void> {
         parse_mode: 'HTML',
         reply_markup: new InlineKeyboard()
           .text('✅ I agree', 'consent:agree')
-          .row()
           .text('Cancel', 'consent:cancel'),
       },
     );
@@ -217,7 +389,7 @@ async function handleTextUpdate(bot: Bot, u: NormalizedUpdate): Promise<void> {
 
   if (u.text === '/help') {
     await reply(
-      "Expense examples:\n\n1. ₹450 dinner with friends\n2. 200 for uber\n\nCommands: \n/start - Start the bot\n/register - Register your account\n/today - View today's expenses\n/week - View this week's expenses\n/month - View this month's expenses\n/last - View your last expense\n/delete - Delete your last expense\n/export - Export your expenses as CSV\n/deleteme - Delete your account and all data\n/cancel - Cancel any pending action",
+      "Expense examples:\n\n1. ₹450 dinner with friends\n2. 200 for uber\n\nCommands: \n/start - Start the bot\n/register - Register your account\n/today - View today's expenses\n/week - View this week's expenses\n/month - View this month's expenses\n/last - View your last expense\n/list - List & delete expenses\n/delete - Delete your last expense\n/export - Export your expenses as CSV\n/deleteme - Delete your account and all data\n/cancel - Cancel any pending action",
     );
     return;
   }
@@ -229,10 +401,12 @@ async function handleTextUpdate(bot: Bot, u: NormalizedUpdate): Promise<void> {
     return;
   }
 
-  if (!(await repos.isRegistered(u.userId))) {
+  const settings = await repos.getUserSettings(u.userId);
+  if (!settings) {
     await reply('Please send /register to register first.');
     return;
   }
+  const currency = settings.currency;
 
   const msgCount = await repos.bumpRateLimit(u.userId);
   if (!(msgCount < RATE_LIMIT_PER_MINUTE + 1)) {
@@ -246,11 +420,11 @@ async function handleTextUpdate(bot: Bot, u: NormalizedUpdate): Promise<void> {
   }
 
   if (PRIVATE_COMMANDS.has(u.text)) {
-    await handlePrivateCommand(bot, u);
+    await handlePrivateCommand(bot, u, currency);
     return;
   }
 
-  await handleAuthenticatedFreeText(bot, u);
+  await handleAuthenticatedFreeText(bot, u, currency);
 }
 
 export async function handleMessage(bot: Bot, ctx: Context): Promise<void> {

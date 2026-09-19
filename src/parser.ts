@@ -16,7 +16,7 @@ const QUERY_HINTS = [
 ] as const;
 
 const AMOUNT_REGEX =
-  /(?:₹|rs\.?|inr\s*)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(?:rupees?|rs\.?|inr)?/i;
+  /(?:\p{Sc}|rs\.?|inr\s*)?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(?:rupees?|rs\.?|inr)?/iu;
 
 export type ParseResult =
   | { isExpense: false }
@@ -56,7 +56,7 @@ export function parseExpense(rawText: string): ParseResult {
     .replace(/\s+/g, ' ')
     .trim();
 
-  description = description.replace(/^(on|for)\s+/i, '').trim();
+  description = description.replace(/^(on|for|to)\s+/i, '').trim();
   if (!description) description = 'Expense';
 
   let category: CategoryName = 'Other';
