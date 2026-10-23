@@ -1,5 +1,7 @@
 # Expense Bot (TypeScript)
 
+[![Powered by DartNode](https://dartnode.com/branding/DN-Open-Source-sm.png)](https://dartnode.com "Powered by DartNode - Free VPS for Open Source")
+
 An AI-assisted Telegram expense tracker, rebuilt from the original n8n workflow as a
 modern TypeScript service.
 
